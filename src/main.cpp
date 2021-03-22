@@ -1,20 +1,30 @@
 #include "main.h"
 
-/**
- * A callback function for LLEMU's center button.
- *
- * When this callback is fired, it will toggle line 2 of the LCD text between
- * "I was pressed!" and nothing.
- */
-void on_center_button() {
-	static bool pressed = false;
-	pressed = !pressed;
-	if (pressed) {
-		pros::lcd::set_text(2, "I was pressed!");
-	} else {
-		pros::lcd::clear_line(2);
-	}
-}
+#include "globals.hpp"
+#include "functions.hpp"
+
+static lv_res_t btn_click_action(lv_obj_t * btn);
+void initStyles();
+
+/* LVGL Coords:
+--INACCESSABLE/BRAIN INFO--
+(0,0)---------------(480,0)
+  |						|
+  |						|
+  |						|
+(0,240)-----------(480,240)
+*/
+
+static lv_color_t mainCanvasBuffer[32 * 220 * 220]; //size is px size times area(w*h)
+
+lv_obj_t * mainButton;
+lv_obj_t * mainCanvas;
+lv_obj_t * mainLabel;
+
+lv_style_t style_min_red;
+lv_style_t style_min_blue;
+
+std::shared_ptr<ChassisController> drive;
 
 /**
  * Runs initialization code. This occurs as soon as the program is started.
@@ -23,10 +33,33 @@ void on_center_button() {
  * to keep execution time for this mode under a few seconds.
  */
 void initialize() {
-	pros::lcd::initialize();
-	pros::lcd::set_text(1, "Hello PROS User!");
+	master.setText(0, 0, std::to_string(autonomousDefault));
 
-	pros::lcd::register_btn1_cb(on_center_button);
+	initStyles();
+
+	mainButton = createBtn(lv_scr_act(), 10, 10, 200, 50, 0, "test");
+	lv_btn_set_action(mainButton, LV_BTN_ACTION_CLICK, btn_click_action);
+	setBtnStyle(createBtnStyle(&lv_style_plain, LV_COLOR_MAKE(125, 0, 0), LV_COLOR_MAKE(255, 0, 0), LV_COLOR_MAKE(100, 0, 0), LV_COLOR_MAKE(200, 0, 0), LV_COLOR_MAKE(0, 0, 0), LV_COLOR_MAKE(255, 255, 255)), mainButton);
+
+	mainLabel = lv_label_create(lv_scr_act(), NULL);
+	lv_label_set_text(mainLabel, "Button has not been clicked.");
+	lv_obj_align(mainLabel, NULL, LV_ALIGN_IN_LEFT_MID, 10, 0);
+	
+	mainCanvas = lv_canvas_create(lv_scr_act(), NULL);
+	lv_canvas_set_buffer(mainCanvas, mainCanvasBuffer, 220, 220, LV_IMG_CF_TRUE_COLOR);
+	lv_obj_set_pos(mainCanvas, 250, 10);
+
+	lv_canvas_draw_circle(mainCanvas, 110, 110, 10, LV_COLOR_YELLOW);
+
+	Da.setBrakeMode(AbstractMotor::brakeMode::coast);
+	Db.setBrakeMode(AbstractMotor::brakeMode::coast);
+	Dc.setBrakeMode(AbstractMotor::brakeMode::coast);
+	Dd.setBrakeMode(AbstractMotor::brakeMode::coast);
+
+	Da.moveVelocity(0);
+	Db.moveVelocity(0);
+	Dc.moveVelocity(0);
+	Dd.moveVelocity(0);
 }
 
 /**
@@ -74,19 +107,57 @@ void autonomous() {}
  * task, not resume it from where it left off.
  */
 void opcontrol() {
-	pros::Controller master(pros::E_CONTROLLER_MASTER);
-	pros::Motor left_mtr(1);
-	pros::Motor right_mtr(2);
-
 	while (true) {
-		pros::lcd::print(0, "%d %d %d", (pros::lcd::read_buttons() & LCD_BTN_LEFT) >> 2,
-		                 (pros::lcd::read_buttons() & LCD_BTN_CENTER) >> 1,
-		                 (pros::lcd::read_buttons() & LCD_BTN_RIGHT) >> 0);
-		int left = master.get_analog(ANALOG_LEFT_Y);
-		int right = master.get_analog(ANALOG_RIGHT_Y);
+		double leftX = master.getAnalog(ControllerAnalog::leftX);	//okapi::conroller master.getAnalog() is double from -1 to 1
+		double leftY = master.getAnalog(ControllerAnalog::leftY);	//pros::controller master.get_analog() is -128 to 127
+		double rightY = master.getAnalog(ControllerAnalog::rightX);
+		double rightX = master.getAnalog(ControllerAnalog::rightY);
 
-		left_mtr = left;
-		right_mtr = right;
-		pros::delay(20);
+		Da.moveVelocity(200 * (rightY + rightX + leftX));
+		Db.moveVelocity(200 * (rightY - rightX + leftX));
+		Dc.moveVelocity(200 * (-rightY + rightX + leftX));
+		Dd.moveVelocity(200 * (-rightY - rightX + leftX));
+
+		lv_canvas_draw_circle(mainCanvas, rightX + 110, rightY + 110, leftY, LV_COLOR_SILVER);
+
+		if(master.getDigital(ControllerDigital::L1)) {
+			intake1.moveVoltage(12000);
+			intake2.moveVoltage(-12000);
+		} else if(master.getDigital(ControllerDigital::L2)) {
+			intake1.moveVelocity(-12000);
+			intake2.moveVelocity(12000);
+		} else {
+			intake1.moveVelocity(0);
+			intake2.moveVelocity(0);
+		}
+
+		if(master.getDigital(ControllerDigital::R1)) {
+			intake3.moveVoltage(12000);
+		} else if(master.getDigital(ControllerDigital::R2)) {
+			intake3.moveVoltage(-12000);
+		} else {
+			intake3.moveVoltage(0);
+		}
+
+		pros::delay(10);
 	}
+}
+
+// User functions: 
+
+static lv_res_t btn_click_action(lv_obj_t * btn) {
+	uint8_t id = lv_obj_get_free_num(btn);
+
+    if(id == 0) {
+        char buffer[100];
+        sprintf(buffer, "button was clicked %i \nmilliseconds from start \n %i", pros::millis(), master.getAnalog(ControllerAnalog::leftX));
+        lv_label_set_text(mainLabel, buffer);
+    }
+    return LV_RES_OK;
+}
+
+void initStyles() {
+	lv_style_copy(&style_min_red, &lv_style_plain);
+	style_min_red.body.main_color = LV_COLOR_MAKE(200, 0, 0);
+	style_min_red.body.radius = 0;
 }
